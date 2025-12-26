@@ -3,8 +3,10 @@ import numpy as np
 from obspy.core import UTCDateTime
 import sys
 import time
+from typing import List, Tuple
 from config import *
 from feature_extractor import *
+
 
 def write_timestamp(t, idx1, idx2, starttime, ts_file):
 	fp_timestamp = np.asarray([t[int(np.mean((idx1[j], idx2[j])))] for j in range(len(idx1))])
@@ -12,7 +14,7 @@ def write_timestamp(t, idx1, idx2, starttime, ts_file):
 		ts_file.write((starttime + datetime.timedelta(seconds = ts)).strftime('%y-%m-%dT%H:%M:%S.%f') + '\n')
 
 
-def normalize_and_fingerprint(haar_images, fp_file):
+def normalize_and_fingerprint(haar_images, params, feats, fp_file):
 	std_haar_images = feats.standardize_haar(haar_images, type = 'MAD')
 	binaryFingerprints =  feats.binarize_vectors_topK_sign(std_haar_images,
 		K = params['fingerprint']['k_coef'])
@@ -21,16 +23,28 @@ def normalize_and_fingerprint(haar_images, fp_file):
 	fp_file.write(b.tobytes())
 
 
-def init_MAD_stats(mad_fname):
+def load_mad_stats(mad_fname, params, feats):
 	ntimes = get_ntimes(params)
 	feats.haar_medians = np.zeros(params['fingerprint']['nfreq'] * ntimes)
 	feats.haar_absdevs = np.zeros(params['fingerprint']['nfreq'] * ntimes)
-	f = open(mad_fname, 'r')
-	for i, line in enumerate(f.readlines()):
-		nums = line.split(',')
-		feats.haar_medians[i] = float(nums[0])
-		feats.haar_absdevs[i] = float(nums[1])
-	f.close()
+	with open(mad_fname, 'r') as f:
+		for i, line in enumerate(f.readlines()):
+			nums = line.split(',')
+			feats.haar_medians[i] = float(nums[0])
+			feats.haar_absdevs[i] = float(nums[1])
+
+
+def compute_fingerprint_block(partition_data: np.ndarray, starttime: datetime.datetime,
+	params, feats) -> Tuple[List[datetime.datetime], List[bytes]]:
+	haar_images, nWindows, idx1, idx2, Sxx, t  = feats.data_to_haar_images(partition_data)
+	fp_timestamps = [starttime + datetime.timedelta(
+		seconds = t[int(np.mean((idx1[j], idx2[j])))] ) for j in range(len(idx1))]
+	std_haar_images = feats.standardize_haar(haar_images, type = 'MAD')
+	binaryFingerprints = feats.binarize_vectors_topK_sign(std_haar_images,
+		K = params['fingerprint']['k_coef'])
+	packed = np.packbits(binaryFingerprints, axis=1)
+	fp_bytes = [row.tobytes() for row in packed]
+	return fp_timestamps, fp_bytes
 
 
 if __name__ == '__main__':
@@ -42,7 +56,7 @@ if __name__ == '__main__':
 	feats = init_feature_extractor(params, get_ntimes(params))
 
 	mad_fname = gen_mad_fname(params)
-	init_MAD_stats(mad_fname)
+	load_mad_stats(mad_fname, params, feats)
 
 	fp_folder, ts_folder = get_fp_ts_folders(params)
 	init_folder([fp_folder, ts_folder])
@@ -76,7 +90,7 @@ if __name__ == '__main__':
 			# Write fingerprint time stamps to file
 			write_timestamp(t, idx1, idx2, s, ts_file)
 			# Normalize and output fingerprints on a roughly 8 hour time interval
-			normalize_and_fingerprint(haar_images, fp_file)
+			normalize_and_fingerprint(haar_images, params, feats, fp_file)
 			s = e
 
 	ts_file.close()
