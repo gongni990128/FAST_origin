@@ -1,40 +1,44 @@
-from os import chdir
-import subprocess
 import argparse
+import subprocess
+from os import chdir
+
+from fingerprint.config import add_runtime_arguments, runtime_args_to_list
 from parse_config import *
 
-fpCommand= 'python gen_fp.py %s'
-idxCommand = 'python global_index.py %s'
+fpCommand = "python gen_fp.py %s"
+idxCommand = "python global_index.py %s"
 
 if __name__ == '__main__':
-	parser = argparse.ArgumentParser()
-	parser.add_argument('-c', '--config',
-		help='name of the global config file', default='config.json')
-	args = parser.parse_args()
-	config = parse_json(args.config)
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-c', '--config',
+        help='name of the global config file', default='config.json')
+    add_runtime_arguments(parser)
+    args = parser.parse_args()
+    config = parse_json(args.config)
 
-	# Get fingerprint parameter files
-	fp_params = []
-	param_dir = "../" + config["io"]["fp_param_dir"]
-	fp_params = [param_dir + f for f in config["io"]["fp_params"]]
+    # Get fingerprint parameter files
+    fp_params = []
+    param_dir = "../" + config["io"]["fp_param_dir"]
+    fp_params = [param_dir + f for f in config["io"]["fp_params"]]
+    runtime_cli = " ".join(runtime_args_to_list(args, defaults=config.get("runtime")))
 
-	# Fingerprinting
-	chdir('fingerprint')
-	for param in fp_params:
-		print("Fingerprinting %s" % param)
-		process = subprocess.Popen((fpCommand % (param)),
-			stdout=subprocess.PIPE, shell=True)
-		output, error = process.communicate()
-		print(output.decode('UTF-8'))
+    # Fingerprinting
+    chdir('fingerprint')
+    for param in fp_params:
+        print("Fingerprinting %s" % param)
+        process = subprocess.Popen(
+            (fpCommand % (param + (" " + runtime_cli if runtime_cli else ""))),
+            stdout=subprocess.PIPE, shell=True)
+        output, error = process.communicate()
+        print(output.decode('UTF-8'))
 
-	# Generate global index
-	idx_dir = get_global_index_dir(config)
-	print("Writing global index to %s" % idx_dir)
-	idx_config = {"index_folder": "../" + idx_dir,
-		"fp_param_dir": param_dir,
-		"fp_params": fp_params}
-	idx_config_fname = param_dir + "global_indices.json"
-	process = subprocess.Popen((idxCommand % (idx_config_fname)),
-			stdout=subprocess.PIPE, shell=True)
-	output, error = process.communicate()
-
+    # Generate global index
+    idx_dir = get_global_index_dir(config)
+    print("Writing global index to %s" % idx_dir)
+    idx_config = {"index_folder": "../" + idx_dir,
+        "fp_param_dir": param_dir,
+        "fp_params": fp_params}
+    idx_config_fname = param_dir + "global_indices.json"
+    process = subprocess.Popen((idxCommand % (idx_config_fname)),
+            stdout=subprocess.PIPE, shell=True)
+    output, error = process.communicate()

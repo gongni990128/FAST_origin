@@ -1,8 +1,13 @@
-from obspy import read
-import numpy as np
-from obspy.core import UTCDateTime
+import argparse
+import logging
 import sys
 import time
+
+import numpy as np
+from obspy import read
+from obspy.core import UTCDateTime
+
+from config import RuntimeMetrics, add_runtime_arguments, apply_runtime_overrides, get_runtime_config
 from config import *
 from feature_extractor import *
 
@@ -34,10 +39,19 @@ def init_MAD_stats(mad_fname):
 
 
 if __name__ == '__main__':
+	logging.basicConfig(level=logging.INFO)
 	t_start = time.time()
-	fname = sys.argv[1]
-	param_json = sys.argv[2]
-	params = parse_json(param_json)
+	parser = argparse.ArgumentParser()
+	parser.add_argument("fname", help="Input waveform filename")
+	parser.add_argument("param_json", help="Fingerprint parameter JSON file")
+	add_runtime_arguments(parser)
+	args = parser.parse_args()
+
+	fname = args.fname
+	param_json = args.param_json
+	params = apply_runtime_overrides(parse_json(param_json), args)
+	runtime_config = get_runtime_config(params)
+	metrics = RuntimeMetrics(runtime_config)
 
 	feats = init_feature_extractor(params, get_ntimes(params))
 
@@ -54,6 +68,7 @@ if __name__ == '__main__':
 	time_padding = get_partition_padding(params)
 	min_fp_length = get_min_fp_length(params)
 
+	total_fp = 0
 	for i in range(len(st)):
 		# Get start and end time of the current continuous segment
 		starttime = datetime.datetime.strptime(str(st[i].stats.starttime), '%Y-%m-%dT%H:%M:%S.%fZ')
@@ -72,15 +87,20 @@ if __name__ == '__main__':
 			partition_st = st[i].slice(UTCDateTime(s.strftime('%Y-%m-%dT%H:%M:%S.%f')),
 				UTCDateTime(e_padding.strftime('%Y-%m-%dT%H:%M:%S.%f')))
 			# Spectrogram + Wavelet transform
+			window_start = time.time()
 			haar_images, nWindows, idx1, idx2, Sxx, t  = feats.data_to_haar_images(partition_st.data)
 			# Write fingerprint time stamps to file
 			write_timestamp(t, idx1, idx2, s, ts_file)
 			# Normalize and output fingerprints on a roughly 8 hour time interval
 			normalize_and_fingerprint(haar_images, fp_file)
+			metrics.log_window_duration(time.time() - window_start)
+			total_fp += len(haar_images)
 			s = e
 
 	ts_file.close()
 	fp_file.close()
 
 	t_end = time.time()
-	print("Binary fingerprints took: %.2f seconds" % (t_end - t_start))
+	total_duration = t_end - t_start
+	metrics.log_fingerprint_output(total_fp, total_duration)
+	print("Binary fingerprints took: %.2f seconds" % (total_duration))

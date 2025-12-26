@@ -1,38 +1,71 @@
-import subprocess
-from multiprocessing import Pool
-import sys
+import argparse
+import logging
 import os
+import subprocess
+import sys
+import time
+from multiprocessing import Pool
+
+from config import (
+    RuntimeMetrics,
+    apply_runtime_overrides,
+    get_runtime_config,
+)
 from config import *
 
 madStatsCommand= 'python MAD.py %s'
 fingerprintCommand = 'python finger_print.py %s %s'
+runtime_cli = ""
 
 
 def call_fingerprint(args):
-	process = subprocess.Popen((fingerprintCommand % (args, param_json)),
-			stdout=subprocess.PIPE, shell=True)
+	cmd = fingerprintCommand % (args, param_json)
+	if runtime_cli:
+		cmd = f"{cmd} {runtime_cli}"
+	process = subprocess.Popen(cmd, stdout=subprocess.PIPE, shell=True)
 	process.communicate()
 
 
 def call_mad(param_json):
 	print("Processing for MAD")
-	process = subprocess.Popen((madStatsCommand % (param_json)),
-			stdout=subprocess.PIPE, shell=True)
+	cmd = madStatsCommand % (param_json)
+	if runtime_cli:
+		cmd = f"{cmd} {runtime_cli}"
+	process = subprocess.Popen(cmd, stdout=subprocess.PIPE, shell=True)
 	output, error = process.communicate()
 	print(output.decode('UTF-8').strip())
 
 
 if __name__ == '__main__':
-	param_json = sys.argv[1]
-	params = parse_json(param_json)
+	logging.basicConfig(level=logging.INFO)
+	parser = argparse.ArgumentParser()
+	parser.add_argument("param_json", help="Fingerprint parameter JSON file")
+	add_runtime_arguments(parser)
+	args = parser.parse_args()
+
+	param_json = args.param_json
+	params = apply_runtime_overrides(parse_json(param_json), args)
+	runtime_config = get_runtime_config(params)
+	metrics = RuntimeMetrics(runtime_config)
+	global runtime_cli
+	runtime_cli = " ".join(runtime_args_to_list(args, defaults=params.get("runtime")))
 
 	# Preprocess to calculate MAD
+	t_mad_start = time.time()
 	call_mad(param_json)
+	metrics.log_mad_update(time.time() - t_mad_start)
 
 	# Fingerprint
 	files = params['data']['fingerprint_files']
-	p = Pool(min(params['performance']['num_fp_thread'], len(files)))
-	p.map(call_fingerprint, files)
+	metrics.log_queue_length(len(files))
+	worker_count = runtime_config.effective_concurrency(
+		params['performance']['num_fp_thread'])
+	if worker_count > 0:
+		pool = Pool(min(worker_count, len(files)))
+		pool.map(call_fingerprint, files)
+	else:
+		for f in files:
+			call_fingerprint(f)
 
 	# Stich fingerprint files
 	nfp = 0
