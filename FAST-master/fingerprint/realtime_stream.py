@@ -3,7 +3,7 @@ Realtime waveform -> fingerprint -> LSH matching
 
 - Ingest 1-second (or arbitrary short) frames from wfdisc/CSS streams
 - Build FAST fingerprints every fp_window seconds with fp_stride spacing
-- Cache template fingerprints, hash them with a light-weight LSH, and
+  - Cache template fingerprints, hash them with a light-weight LSH, and
   emit matches or "hot" buckets whose occupancy exceeds a threshold.
 
 Example wiring with a 1-second frame pull:
@@ -91,7 +91,6 @@ class FingerprintGenerator:
 		self.ntimes = get_ntimes(params)
 		self.feats = init_feature_extractor(params, self.ntimes)
 		load_mad_stats(gen_mad_fname(params), params, self.feats)
-		self.partition_padding = get_partition_padding(params).total_seconds()
 
 	def generate(self, window_data: np.ndarray, window_start: datetime.datetime):
 		return compute_fingerprint_block(window_data, window_start, self.params, self.feats)
@@ -163,14 +162,20 @@ class RealtimeWaveformProcessor:
 	def __init__(self, params: dict, template_fingerprints: Optional[List[bytes]] = None,
 		template_ids: Optional[List[str]] = None, buffer_seconds: float = 3600,
 		fp_stride: float = 1.0, fp_window: Optional[float] = None,
+		warmup_seconds: Optional[float] = None,
 		lsh_bands: int = 16, lsh_rows: int = 8, bucket_threshold: int = 3,
 		cache_size: int = 10000):
 		self.params = params
 		self.sampling_rate = params['fingerprint']['sampling_rate']
-		self.fp_window = fp_window or params['performance']['partition_len']
+
+		# 窗口长度：若未显式传入，默认使用“可生成一个指纹的最小长度”
+		# 而不是批处理时的超长 partition_len
+		self.fp_min = get_min_fp_length(params)
+		self.fp_window = fp_window or self.fp_min
+		self.fp_window = max(self.fp_window, self.fp_min)
 		self.fp_stride = fp_stride
 		self.fp_padding = get_partition_padding(params).total_seconds()
-		self.fp_min = get_min_fp_length(params)
+		self.warmup_seconds = warmup_seconds if warmup_seconds is not None else self.fp_window
 
 		self.buffer = RingBuffer(self.sampling_rate, buffer_seconds)
 		self.generator = FingerprintGenerator(params)
@@ -194,10 +199,15 @@ class RealtimeWaveformProcessor:
 		frame_start_dt = self._to_datetime(frame_start)
 		self.buffer.append(frame, frame_start_dt)
 		if self.next_fp_time is None:
-			self.next_fp_time = frame_start_dt
+			# 初始等待 warmup 秒，保证首个指纹有足够波形
+			self.next_fp_time = frame_start_dt + datetime.timedelta(seconds = self.warmup_seconds)
 
 		hits: List[FingerprintHit] = []
 		window_seconds = self.fp_window + self.fp_padding
+
+		# 如果 next_fp_time 早于 buffer 起点（例如 warmup 后的回退），对齐到当前缓冲
+		if self.buffer.start_time and self.next_fp_time < self.buffer.start_time:
+			self.next_fp_time = self.buffer.start_time
 
 		while True:
 			window_data = self.buffer.window(self.next_fp_time, window_seconds)
