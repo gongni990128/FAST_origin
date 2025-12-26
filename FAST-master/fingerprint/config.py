@@ -1,14 +1,162 @@
 import json
 import datetime
+import logging
+import math
+from dataclasses import dataclass
 from os import listdir, makedirs
 from os.path import isfile, join, abspath, dirname, exists
-import math
+from typing import Any, Dict, Iterable, Optional
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class RuntimeConfig:
+    realtime_mode: bool = False
+    buffer_size: int = 0
+    concurrency: Optional[int] = None
+    latency_threshold: float = 0.0
+
+    def effective_concurrency(self, default: int) -> int:
+        if self.concurrency is None or self.concurrency <= 0:
+            return default
+        return self.concurrency
+
+
+class RuntimeMetrics:
+    def __init__(self, runtime_config: RuntimeConfig):
+        self.runtime_config = runtime_config
+
+    def log_queue_length(self, queue_length: int) -> None:
+        logger.info(
+            "runtime.queue_length=%d buffer_size=%d realtime_mode=%s",
+            queue_length,
+            self.runtime_config.buffer_size,
+            self.runtime_config.realtime_mode,
+        )
+
+    def log_window_duration(self, duration_sec: float) -> None:
+        logger.info(
+            "runtime.window_duration_sec=%.3f latency_threshold=%.3f",
+            duration_sec,
+            self.runtime_config.latency_threshold,
+        )
+        if self.runtime_config.latency_threshold and (
+            duration_sec > self.runtime_config.latency_threshold
+        ):
+            logger.warning(
+                "runtime.window_duration_exceeded duration_sec=%.3f threshold=%.3f",
+                duration_sec,
+                self.runtime_config.latency_threshold,
+            )
+
+    def log_fingerprint_output(self, count: int, duration_sec: float) -> None:
+        rate = 0.0
+        if duration_sec > 0:
+            rate = count / duration_sec
+        logger.info(
+            "runtime.fingerprint_output count=%d rate_per_sec=%.3f",
+            count,
+            rate,
+        )
+
+    def log_mad_update(self, duration_sec: float) -> None:
+        logger.info("runtime.mad_update_sec=%.3f", duration_sec)
 
 
 def parse_json(param_json):
     with open(param_json) as json_data_file:
         params = json.load(json_data_file)
     return params
+
+
+def add_runtime_arguments(parser):
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--stream",
+        action="store_true",
+        help="Enable realtime/streaming mode",
+    )
+    group.add_argument(
+        "--batch",
+        action="store_true",
+        help="Force batch/offline mode (default)",
+    )
+    parser.add_argument(
+        "--buffer-size",
+        type=int,
+        help="Queue buffer size used when dispatching fingerprint tasks",
+    )
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        help="Override worker concurrency for fingerprint generation",
+    )
+    parser.add_argument(
+        "--latency-threshold",
+        type=float,
+        help="Soft latency budget (seconds) for processing a window",
+    )
+
+
+def _normalize_runtime_block(runtime_block: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if runtime_block is None:
+        runtime_block = {}
+    return runtime_block
+
+
+def apply_runtime_overrides(params: Dict[str, Any], args: Any) -> Dict[str, Any]:
+    runtime_block = _normalize_runtime_block(params.get("runtime"))
+    if getattr(args, "stream", False):
+        runtime_block["realtime_mode"] = True
+    if getattr(args, "batch", False):
+        runtime_block["realtime_mode"] = False
+    if getattr(args, "buffer_size", None) is not None:
+        runtime_block["buffer_size"] = args.buffer_size
+    if getattr(args, "concurrency", None) is not None:
+        runtime_block["concurrency"] = args.concurrency
+    if getattr(args, "latency_threshold", None) is not None:
+        runtime_block["latency_threshold"] = args.latency_threshold
+    params["runtime"] = runtime_block
+    return params
+
+
+def runtime_args_to_list(args: Any, defaults: Optional[Dict[str, Any]] = None) -> Iterable[str]:
+    defaults = _normalize_runtime_block(defaults)
+    cli_args = []
+    mode = None
+    if getattr(args, "stream", False):
+        mode = "stream"
+    elif getattr(args, "batch", False):
+        mode = "batch"
+    elif "realtime_mode" in defaults:
+        mode = "stream" if defaults["realtime_mode"] else "batch"
+    if mode == "stream":
+        cli_args.append("--stream")
+    elif mode == "batch":
+        cli_args.append("--batch")
+
+    def _append_arg(attr_name: str, key: str, flag: str):
+        value = getattr(args, attr_name, None)
+        if value is None:
+            value = defaults.get(key)
+        if value is not None:
+            cli_args.extend([flag, str(value)])
+
+    _append_arg("buffer_size", "buffer_size", "--buffer-size")
+    _append_arg("concurrency", "concurrency", "--concurrency")
+    _append_arg("latency_threshold", "latency_threshold", "--latency-threshold")
+    return cli_args
+
+
+def get_runtime_config(params: Dict[str, Any]) -> RuntimeConfig:
+    runtime_block = _normalize_runtime_block(params.get("runtime"))
+    return RuntimeConfig(
+        realtime_mode=runtime_block.get("realtime_mode", False),
+        buffer_size=runtime_block.get("buffer_size", 0) or 0,
+        concurrency=runtime_block.get("concurrency"),
+        latency_threshold=float(runtime_block.get("latency_threshold", 0.0) or 0.0),
+    )
 
 
 def should_include_file(f, params):
@@ -115,4 +263,3 @@ def get_partition_padding(params):
         params['fingerprint']['spec_lag']
     time_extra = datetime.timedelta(seconds=sec_extra)
     return time_extra
-

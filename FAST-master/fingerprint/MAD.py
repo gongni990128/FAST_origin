@@ -1,11 +1,16 @@
-from obspy import read
-import numpy as np
-import time
-from obspy.core import UTCDateTime
-from multiprocessing import Pool
+import argparse
+import logging
 import os
-import sys
 import random
+import sys
+import time
+from multiprocessing import Pool
+
+import numpy as np
+from obspy import read
+from obspy.core import UTCDateTime
+
+from config import RuntimeMetrics, add_runtime_arguments, apply_runtime_overrides, get_runtime_config
 from config import *
 from feature_extractor import *
 
@@ -93,8 +98,14 @@ def get_haar_image(fname):
 
 def get_haar_stats():
 	files = params['data']['MAD_sample_files']
-	pool = Pool(min(params['performance']['num_fp_thread'], len(files)))
-	pool.map(get_haar_image, files)
+	worker_count = runtime_config.effective_concurrency(
+		params['performance']['num_fp_thread'])
+	if worker_count > 0:
+		pool = Pool(min(worker_count, len(files)))
+		pool.map(get_haar_image, files)
+	else:
+		for f in files:
+			get_haar_image(f)
 	sample_haar_images = []
 	for file in files:
 		file_name = mad_folder+'%s_sample.npy' % file
@@ -110,10 +121,19 @@ def get_haar_stats():
 
 
 if __name__ == '__main__':
+	logging.basicConfig(level=logging.INFO)
 	t_start = time.time()
-	param_json = sys.argv[1]
-	params = parse_json(param_json)
+	parser = argparse.ArgumentParser()
+	parser.add_argument("param_json", help="Fingerprint parameter JSON file")
+	add_runtime_arguments(parser)
+	args = parser.parse_args()
+
+	param_json = args.param_json
+	params = apply_runtime_overrides(parse_json(param_json), args)
 	feats = init_feature_extractor(params, get_ntimes(params))
+	global runtime_config
+	runtime_config = get_runtime_config(params)
+	metrics = RuntimeMetrics(runtime_config)
 
 	mad_folder = params['data']['folder'] + 'mad/'
 	if not os.path.exists(mad_folder):
@@ -126,4 +146,6 @@ if __name__ == '__main__':
 		f.write('%.16f,%.16f\n' %(median[i], mad[i]))
 	f.close()
 	t_end = time.time()
-	print("MAD fingerprints took: %.2f seconds" % (t_end - t_start))
+	total_duration = t_end - t_start
+	metrics.log_mad_update(total_duration)
+	print("MAD fingerprints took: %.2f seconds" % (total_duration))
